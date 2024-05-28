@@ -60,6 +60,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.util import str2bool, seed_everything, print_setting
+
+
 """### Set arguments"""
 
 parser = argparse.ArgumentParser(description='Train MoCo on CIFAR-10')
@@ -68,7 +71,7 @@ parser.add_argument('-a', '--arch', default='resnet18')
 
 # lr: 0.06 for batch 512 (or 0.03 for batch 256)
 parser.add_argument('--lr', '--learning-rate', default=0.06, type=float, metavar='LR', help='initial learning rate', dest='lr')
-parser.add_argument('--epochs', default=200, type=int, metavar='N', help='number of total epochs to run')
+parser.add_argument('--epochs', default=800, type=int, metavar='N', help='number of total epochs to run')
 parser.add_argument('--schedule', default=[120, 160], nargs='*', type=int, help='learning rate schedule (when to drop lr by 10x); does not take effect if --cos is on')
 parser.add_argument('--cos', action='store_true', help='use cosine lr schedule')
 
@@ -93,13 +96,14 @@ parser.add_argument('--knn-t', default=0.1, type=float, help='softmax temperatur
 parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')
 parser.add_argument('--results-dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
 
+
 '''
 args = parser.parse_args()  # running in command line
 '''
 args = parser.parse_args('')  # running in ipynb
 
 # set command line arguments here when running in ipynb
-args.epochs = 800
+args.epochs = 200
 args.cos = True
 args.schedule = []  # cos in use
 args.symmetric = False
@@ -367,6 +371,8 @@ def train(net, data_loader, train_optimizer, epoch, args):
         total_loss += loss.item() * data_loader.batch_size
         msg = 'Train Epoch: [{}/{}], lr: {:.6f}, Loss: {:.4f}'.format(epoch, args.epochs, optimizer.param_groups[0]['lr'], total_loss / total_num)
         train_bar.set_description(msg)
+        
+        utils.write_log(args.results_dir + '/model_last.pth', msg)
 
     return total_loss / total_num
 
@@ -413,7 +419,6 @@ def test(net, memory_data_loader, test_data_loader, epoch, args):
             test_bar.set_description(msg)
         utils.write_log(args.results_dir + '/log.txt', msg+'\n')
 
-
     return total_top1 / total_num * 100
 
 # knn monitor as in InstDisc https://arxiv.org/abs/1805.01978
@@ -444,7 +449,7 @@ optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd
 
 # load model if resume
 epoch_start = 1
-if args.resume is not '':
+if args.resume != '':
     checkpoint = torch.load(args.resume)
     model.load_state_dict(checkpoint['state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer'])

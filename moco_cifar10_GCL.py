@@ -55,10 +55,14 @@ import argparse
 import json
 import math
 import os
+import ast
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from utils.util import str2bool, seed_everything, print_setting
+
 
 """### Set arguments"""
 
@@ -69,10 +73,10 @@ parser.add_argument('-a', '--arch', default='resnet18')
 # lr: 0.06 for batch 512 (or 0.03 for batch 256)
 parser.add_argument('--lr', '--learning-rate', default=0.06, type=float, metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--epochs', default=800, type=int, metavar='N', help='number of total epochs to run')
-parser.add_argument('--schedule', default=[120, 160], nargs='*', type=int, help='learning rate schedule (when to drop lr by 10x); does not take effect if --cos is on')
-parser.add_argument('--cos', action='store_true', help='use cosine lr schedule')
+parser.add_argument('--schedule', default="[120, 160]", type=ast.literal_eval, help='learning rate schedule (when to drop lr by 10x); does not take effect if --cos is on')
+parser.add_argument('--cos', default=True, type=ast.literal_eval, help='use cosine lr schedule')
 
-parser.add_argument('--batch-size', default=512, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--batch_size', default=512, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--wd', default=5e-4, type=float, metavar='W', help='weight decay')
 
 # moco specific configs:
@@ -83,7 +87,7 @@ parser.add_argument('--moco-t', default=0.1, type=float, help='softmax temperatu
 
 parser.add_argument('--bn-splits', default=8, type=int, help='simulate multi-gpu behavior of BatchNorm in one gpu; 1 is SyncBatchNorm in multi-gpu')
 
-parser.add_argument('--symmetric', action='store_true', help='use a symmetric loss function that backprops to both crops')
+parser.add_argument('--symmetric',default=False, type=ast.literal_eval, help='use a symmetric loss function that backprops to both crops')
 
 # knn monitor
 parser.add_argument('--knn-k', default=200, type=int, help='k in kNN monitor')
@@ -91,22 +95,24 @@ parser.add_argument('--knn-t', default=0.1, type=float, help='softmax temperatur
 
 # utils
 parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')
-parser.add_argument('--results-dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
+parser.add_argument('--results_dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
 
-'''
-args = parser.parse_args()  # running in command line
+
+# GCL
+parser.add_argument('--seed', default=527, type=int)
+parser.add_argument('--GCL', default=True, type=str2bool)
+parser.add_argument('--num_patch', default=8, type=int)
+
+
 '''
 args = parser.parse_args('')  # running in ipynb
-
-# set command line arguments here when running in ipynb
-args.epochs = 800
-args.cos = True
-args.schedule = []  # cos in use
-args.symmetric = False
+'''
+args = parser.parse_args()  # running in command line
 if args.results_dir == '':
     args.results_dir = './cache-' + datetime.now().strftime("%Y-%m-%d-%H-%M-%S-moco")
 
 print(args)
+seed_everything(args.seed)
 
 """### Define data loaders"""
 
@@ -122,6 +128,29 @@ class CIFAR10Pair(CIFAR10):
             im_2 = self.transform(img)
 
         return im_1, im_2
+    
+class CIFAR10Grpoup(CIFAR10):
+    """CIFAR10 Dataset.
+    """
+    def __init__(self, root, train, transform, download, num_patch=8):
+        super().__init__(root, train, transform, download)
+        self.num_patch = num_patch
+
+    def __getitem__(self, index):
+        img = self.data[index]
+        img = Image.fromarray(img)
+
+        images1 = []
+        if self.transform:
+            for _ in range(self.num_patch):
+                images1.append(self.transform(img))
+
+        images2 = []
+        if self.transform:
+            for _ in range(self.num_patch):
+                images2.append(self.transform(img))
+
+        return torch.stack(images1), torch.stack(images2)
 
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(32),
@@ -136,7 +165,7 @@ test_transform = transforms.Compose([
     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
 # data prepare
-train_data = CIFAR10Pair(root='data', train=True, transform=train_transform, download=True)
+train_data = CIFAR10Grpoup(root='data', train=True, transform=train_transform, download=True, num_patch=args.num_patch)
 train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=16, pin_memory=True, drop_last=True)
 
 memory_data = CIFAR10(root='data', train=True, transform=test_transform, download=True)
@@ -206,13 +235,14 @@ class ModelBase(nn.Module):
 """### Define MoCo wrapper"""
 
 class ModelMoCo(nn.Module):
-    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8, symmetric=True):
+    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8, symmetric=True, num_patch=8):
         super(ModelMoCo, self).__init__()
 
         self.K = K
         self.m = m
         self.T = T
         self.symmetric = symmetric
+        self.num_patch = num_patch
 
         # create the encoders
         self.encoder_q = ModelBase(feature_dim=dim, arch=arch, bn_splits=bn_splits)
@@ -268,22 +298,55 @@ class ModelMoCo(nn.Module):
         Undo batch shuffle.
         """
         return x[idx_unshuffle]
+    
+    
+    def get_centroid(self, images_q, sim='cos'):
+        """ images_q, images_k (B,G/2,3,32,32) -> im_q, im_k (B,3,32,32) """
 
-    def contrastive_loss(self, im_q, im_k):
+        def _get_centroid(tensors, sim=sim):
+            """ tensors =  tensor of size (num_gp,3,32,32)"""
+            if sim == 'dot':
+                return torch.mean(tensors, dim=0)
+            elif sim == 'cos' or sim == 'angle':
+                for n in range(len(tensors)) :
+                    if n == 0 :
+                        temp_cen = tensors[n]/torch.linalg.norm(tensors[n],2)
+                    else :
+                        next_vec = tensors[n] / torch.linalg.norm(tensors[n], 2)
+                        theta = torch.arccos(torch.dot(temp_cen, next_vec))
+
+                        tan_vec  = next_vec - torch.dot(next_vec, temp_cen) * temp_cen
+                        tan_vec  = tan_vec / (torch.linalg.norm(tan_vec, 2) + 1e-9)
+                        temp_cen = torch.cos(theta / (1 + n)) * temp_cen + torch.sin(theta / (1 + n)) * tan_vec
+                        temp_cen = temp_cen / torch.linalg.norm(temp_cen, 2)
+                return temp_cen
+
+        batch_size = int(images_q.size()[0]/self.num_patch)
+        q = []
+        for i in range(batch_size):
+            q.append(_get_centroid(images_q[i*self.num_patch:(i+1)*self.num_patch]))
+
+        return torch.stack(q)
+
+
+    def group_contrastive_loss(self, images_q, images_k):
         # compute query features
-        q = self.encoder_q(im_q)  # queries: NxC
+        q = self.encoder_q(images_q)  # queries: NxC
         q = nn.functional.normalize(q, dim=1)  # already normalized
+        q = self.get_centroid(q, sim='cos')
+
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
             # shuffle for making use of BN
-            im_k_, idx_unshuffle = self._batch_shuffle_single_gpu(im_k)
+            im_k_, idx_unshuffle = self._batch_shuffle_single_gpu(images_k)
 
             k = self.encoder_k(im_k_)  # keys: NxC
             k = nn.functional.normalize(k, dim=1)  # already normalized
 
             # undo shuffle
-            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle)
+            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle) #여기서 저장
+            k = self.get_centroid(k, sim='cos')
 
         # compute logits
         # Einstein sum is more intuitive
@@ -303,9 +366,13 @@ class ModelMoCo(nn.Module):
 
         loss = nn.CrossEntropyLoss().cuda()(logits, labels)
 
+        ## TODO 제발 여기 걸리지 않기를...
+        if torch.isnan(loss).any():
+            breakpoint()
+
         return loss, q, k
 
-    def forward(self, im1, im2):
+    def forward(self, images_q, images_k):
         """
         Input:
             im_q: a batch of query images
@@ -320,12 +387,12 @@ class ModelMoCo(nn.Module):
 
         # compute loss
         if self.symmetric:  # asymmetric loss
-            loss_12, q1, k2 = self.contrastive_loss(im1, im2)
-            loss_21, q2, k1 = self.contrastive_loss(im2, im1)
+            loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k)
+            loss_21, q2, k1 = self.group_contrastive_loss(images_q, images_k)
             loss = loss_12 + loss_21
             k = torch.cat([k1, k2], dim=0)
         else:  # asymmetric loss
-            loss, q, k = self.contrastive_loss(im1, im2)
+            loss, q, k = self.group_contrastive_loss(images_q, images_k)
 
         self._dequeue_and_enqueue(k)
 
@@ -340,6 +407,7 @@ model = ModelMoCo(
         arch=args.arch,
         bn_splits=args.bn_splits,
         symmetric=args.symmetric,
+        num_patch=args.num_patch,
     ).cuda()
 print(model.encoder_q)
 
@@ -354,10 +422,11 @@ def train(net, data_loader, train_optimizer, epoch, args):
     adjust_learning_rate(optimizer, epoch, args)
 
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
-    for im_1, im_2 in train_bar:
-        im_1, im_2 = im_1.cuda(non_blocking=True), im_2.cuda(non_blocking=True)
+    for images1, images2 in train_bar:  # (B,G/2,3,32,32) * 2
+        images1, images2 = images1.cuda(non_blocking=True), images2.cuda(non_blocking=True)
+        images1, images2 = images1.view(-1,3,32,32), images2.view(-1,3,32,32)
 
-        loss = net(im_1, im_2)
+        loss = net(images1, images2)
 
         train_optimizer.zero_grad()
         loss.backward()
@@ -401,6 +470,7 @@ def test(net, memory_data_loader, test_data_loader, epoch, args):
         feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
         # loop test data to predict the label by weighted knn search
         test_bar = tqdm(test_data_loader)
+        msg = ''
         for data, target in test_bar:
             data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
             feature = net(data)
@@ -410,7 +480,9 @@ def test(net, memory_data_loader, test_data_loader, epoch, args):
 
             total_num += data.size(0)
             total_top1 += (pred_labels[:, 0] == target).float().sum().item()
-            test_bar.set_description('Test Epoch: [{}/{}] Acc@1:{:.2f}%'.format(epoch, args.epochs, total_top1 / total_num * 100))
+            msg = 'Test Epoch: [{}/{}] Acc@1:{:.2f}%'.format(epoch, args.epochs, total_top1 / total_num * 100)
+            test_bar.set_description(msg)
+        utils.write_log(args.results_dir + '/log.txt', msg+'\n')
 
     return total_top1 / total_num * 100
 
@@ -442,7 +514,7 @@ optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd
 
 # load model if resume
 epoch_start = 1
-if args.resume is not '':
+if args.resume != '':
     checkpoint = torch.load(args.resume)
     model.load_state_dict(checkpoint['state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer'])
