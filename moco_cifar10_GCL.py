@@ -366,10 +366,6 @@ class ModelMoCo(nn.Module):
 
         loss = nn.CrossEntropyLoss().cuda()(logits, labels)
 
-        ## TODO 제발 여기 걸리지 않기를...
-        if torch.isnan(loss).any():
-            breakpoint()
-
         return loss, q, k
 
     def forward(self, images_q, images_k):
@@ -388,13 +384,14 @@ class ModelMoCo(nn.Module):
         # compute loss
         if self.symmetric:  # asymmetric loss
             loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k)
-            loss_21, q2, k1 = self.group_contrastive_loss(images_q, images_k)
+            loss_21, q2, k1 = self.group_contrastive_loss(images_k, images_q)
             loss = loss_12 + loss_21
             k = torch.cat([k1, k2], dim=0)
         else:  # asymmetric loss
             loss, q, k = self.group_contrastive_loss(images_q, images_k)
 
-        self._dequeue_and_enqueue(k)
+        if not torch.isnan(loss).any():
+            self._dequeue_and_enqueue(k)
 
         return loss
 
@@ -427,6 +424,8 @@ def train(net, data_loader, train_optimizer, epoch, args):
         images1, images2 = images1.view(-1,3,32,32), images2.view(-1,3,32,32)
 
         loss = net(images1, images2)
+        if torch.isnan(loss).any():
+            continue
 
         train_optimizer.zero_grad()
         loss.backward()

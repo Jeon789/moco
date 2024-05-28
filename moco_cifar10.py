@@ -98,12 +98,12 @@ parser.add_argument('--results-dir', default='', type=str, metavar='PATH', help=
 
 
 '''
-args = parser.parse_args()  # running in command line
-'''
 args = parser.parse_args('')  # running in ipynb
+'''
+args = parser.parse_args()  # running in command line
 
 # set command line arguments here when running in ipynb
-args.epochs = 200
+args.epochs = 800
 args.cos = True
 args.schedule = []  # cos in use
 args.symmetric = False
