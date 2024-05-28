@@ -62,7 +62,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.util import str2bool, seed_everything, print_setting
-
+import time
 
 """### Set arguments"""
 
@@ -308,17 +308,15 @@ class ModelMoCo(nn.Module):
             if sim == 'dot':
                 return torch.mean(tensors, dim=0)
             elif sim == 'cos' or sim == 'angle':
+                temp_cen = tensors[0]
                 for n in range(len(tensors)) :
-                    if n == 0 :
-                        temp_cen = tensors[n]/torch.linalg.norm(tensors[n],2)
-                    else :
-                        next_vec = tensors[n] / torch.linalg.norm(tensors[n], 2)
+                    if n != 0 :
+                        next_vec = tensors[n]
                         theta = torch.arccos(torch.dot(temp_cen, next_vec))
 
                         tan_vec  = next_vec - torch.dot(next_vec, temp_cen) * temp_cen
                         tan_vec  = tan_vec / (torch.linalg.norm(tan_vec, 2) + 1e-9)
-                        temp_cen = torch.cos(theta / (1 + n)) * temp_cen + torch.sin(theta / (1 + n)) * tan_vec
-                        temp_cen = temp_cen / torch.linalg.norm(temp_cen, 2)
+                        temp_cen = torch.cos( (n/n+1)*theta ) * temp_cen + torch.sin( (n/n+1)*theta ) * tan_vec
                 return temp_cen
 
         batch_size = int(images_q.size()[0]/self.num_patch)
@@ -333,7 +331,9 @@ class ModelMoCo(nn.Module):
         # compute query features
         q = self.encoder_q(images_q)  # queries: NxC
         q = nn.functional.normalize(q, dim=1)  # already normalized
+        # start = time.time()
         q = self.get_centroid(q, sim='cos')
+        # print(f"get_centriod : {time.time()-start:.4f}")
 
 
         # compute key features
@@ -419,13 +419,21 @@ def train(net, data_loader, train_optimizer, epoch, args):
     adjust_learning_rate(optimizer, epoch, args)
 
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
+    # t = time.time()
     for images1, images2 in train_bar:  # (B,G/2,3,32,32) * 2
+        # print(f"Data Load Time : {time.time()-t:.4f}")
+        # t = time.time()
+
+        # start = time.time()
         images1, images2 = images1.cuda(non_blocking=True), images2.cuda(non_blocking=True)
         images1, images2 = images1.view(-1,3,32,32), images2.view(-1,3,32,32)
 
         loss = net(images1, images2)
         if torch.isnan(loss).any():
             continue
+
+        # print(f"Forward Time : {time.time()-t:.4f}")
+        # t = time.time()
 
         train_optimizer.zero_grad()
         loss.backward()
@@ -434,8 +442,10 @@ def train(net, data_loader, train_optimizer, epoch, args):
         total_num += data_loader.batch_size
         total_loss += loss.item() * data_loader.batch_size
         msg = 'Train Epoch: [{}/{}], lr: {:.6f}, Loss: {:.4f}'.format(epoch, args.epochs, optimizer.param_groups[0]['lr'], total_loss / total_num)
-        train_bar.set_description(msg)
         
+        # print(f"Upadte Time : {time.time()-t:.4f}")
+        # t = time.time()
+        train_bar.set_description(msg)
         utils.write_log(args.results_dir + '/model_last.pth', msg)
 
     return total_loss / total_num
