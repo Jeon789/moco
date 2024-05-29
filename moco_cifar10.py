@@ -94,7 +94,7 @@ parser.add_argument('--knn-t', default=0.1, type=float, help='softmax temperatur
 
 # utils
 parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')
-parser.add_argument('--results-dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
+parser.add_argument('--results_dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
 
 
 '''

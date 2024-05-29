@@ -1,6 +1,6 @@
 ## basic
-# python moco_cifar10.py  --results_dir=basic --batch_size=128 --lr=0.02
-# python moco_cifar10.py --results_dir=basic  --batch_size=256 --lr=0.03
+python moco_cifar10.py  --results_dir=basic_256  --batch_size=256 --lr=0.03 
+python moco_cifar10.py  --results_dir=basic_512  --batch_size=512 --lr=0.06 
 
 
 

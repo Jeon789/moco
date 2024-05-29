@@ -102,6 +102,7 @@ parser.add_argument('--results_dir', default='', type=str, metavar='PATH', help=
 parser.add_argument('--seed', default=527, type=int)
 parser.add_argument('--GCL', default=True, type=str2bool)
 parser.add_argument('--num_patch', default=8, type=int)
+parser.add_argument('--sim', default='cos', type=str)
 
 
 '''
@@ -166,13 +167,13 @@ test_transform = transforms.Compose([
 
 # data prepare
 train_data = CIFAR10Grpoup(root='data', train=True, transform=train_transform, download=True, num_patch=args.num_patch)
-train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=16, pin_memory=True, drop_last=True)
+train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=10, pin_memory=True, drop_last=True)
 
 memory_data = CIFAR10(root='data', train=True, transform=test_transform, download=True)
-memory_loader = DataLoader(memory_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+memory_loader = DataLoader(memory_data, batch_size=args.batch_size, shuffle=False, num_workers=10, pin_memory=True)
 
 test_data = CIFAR10(root='data', train=False, transform=test_transform, download=True)
-test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=10, pin_memory=True)
 
 """### Define base encoder"""
 
@@ -235,7 +236,7 @@ class ModelBase(nn.Module):
 """### Define MoCo wrapper"""
 
 class ModelMoCo(nn.Module):
-    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8, symmetric=True, num_patch=8):
+    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8, symmetric=True, num_patch=8, sim='cos'):
         super(ModelMoCo, self).__init__()
 
         self.K = K
@@ -327,12 +328,12 @@ class ModelMoCo(nn.Module):
         return torch.stack(q)
 
 
-    def group_contrastive_loss(self, images_q, images_k):
+    def group_contrastive_loss(self, images_q, images_k, sim='cos'):
         # compute query features
         q = self.encoder_q(images_q)  # queries: NxC
         q = nn.functional.normalize(q, dim=1)  # already normalized
         # start = time.time()
-        q = self.get_centroid(q, sim='cos')
+        q = self.get_centroid(q, sim=sim)
         # print(f"get_centriod : {time.time()-start:.4f}")
 
 
@@ -383,12 +384,12 @@ class ModelMoCo(nn.Module):
 
         # compute loss
         if self.symmetric:  # asymmetric loss
-            loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k)
-            loss_21, q2, k1 = self.group_contrastive_loss(images_k, images_q)
+            loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k, sim=sim)
+            loss_21, q2, k1 = self.group_contrastive_loss(images_k, images_q, sim=sim)
             loss = loss_12 + loss_21
             k = torch.cat([k1, k2], dim=0)
         else:  # asymmetric loss
-            loss, q, k = self.group_contrastive_loss(images_q, images_k)
+            loss, q, k = self.group_contrastive_loss(images_q, images_k, sim=sim)
 
         if not torch.isnan(loss).any():
             self._dequeue_and_enqueue(k)
@@ -405,6 +406,7 @@ model = ModelMoCo(
         bn_splits=args.bn_splits,
         symmetric=args.symmetric,
         num_patch=args.num_patch,
+        sim = args.sim,
     ).cuda()
 print(model.encoder_q)
 
