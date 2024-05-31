@@ -167,13 +167,13 @@ test_transform = transforms.Compose([
 
 # data prepare
 train_data = CIFAR10Grpoup(root='data', train=True, transform=train_transform, download=True, num_patch=args.num_patch)
-train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=10, pin_memory=True, drop_last=True)
+train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
 
 memory_data = CIFAR10(root='data', train=True, transform=test_transform, download=True)
-memory_loader = DataLoader(memory_data, batch_size=args.batch_size, shuffle=False, num_workers=10, pin_memory=True)
+memory_loader = DataLoader(memory_data, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 test_data = CIFAR10(root='data', train=False, transform=test_transform, download=True)
-test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=10, pin_memory=True)
+test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 """### Define base encoder"""
 
@@ -317,7 +317,7 @@ class ModelMoCo(nn.Module):
 
                         tan_vec  = next_vec - torch.dot(next_vec, temp_cen) * temp_cen
                         tan_vec  = tan_vec / (torch.linalg.norm(tan_vec, 2) + 1e-9)
-                        temp_cen = torch.cos( (n/n+1)*theta ) * temp_cen + torch.sin( (n/n+1)*theta ) * tan_vec
+                        temp_cen = torch.cos( (1/n+1)*theta ) * temp_cen + torch.sin( (1/n+1)*theta ) * tan_vec
                 return temp_cen
 
         batch_size = int(images_q.size()[0]/self.num_patch)
@@ -384,12 +384,12 @@ class ModelMoCo(nn.Module):
 
         # compute loss
         if self.symmetric:  # asymmetric loss
-            loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k, sim=sim)
-            loss_21, q2, k1 = self.group_contrastive_loss(images_k, images_q, sim=sim)
+            loss_12, q1, k2 = self.group_contrastive_loss(images_q, images_k, sim=self.sim)
+            loss_21, q2, k1 = self.group_contrastive_loss(images_k, images_q, sim=self.sim)
             loss = loss_12 + loss_21
             k = torch.cat([k1, k2], dim=0)
         else:  # asymmetric loss
-            loss, q, k = self.group_contrastive_loss(images_q, images_k, sim=sim)
+            loss, q, k = self.group_contrastive_loss(images_q, images_k, sim=self.sim)
 
         if not torch.isnan(loss).any():
             self._dequeue_and_enqueue(k)
