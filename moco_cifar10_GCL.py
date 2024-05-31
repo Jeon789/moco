@@ -153,13 +153,43 @@ class CIFAR10Grpoup(CIFAR10):
 
         return torch.stack(images1), torch.stack(images2)
 
+# train_transform = transforms.Compose([
+#     transforms.RandomResizedCrop(32),
+#     transforms.RandomHorizontalFlip(p=0.5),
+#     transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+#     transforms.RandomGrayscale(p=0.2),
+#     transforms.ToTensor(),
+#     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+# 이중에 1개
+# geometric transforms
+geo_transform = transforms.RandomChoice([
+transforms.RandomHorizontalFlip(),
+transforms.RandomVerticalFlip(),
+transforms.RandomRotation(180),
+# transforms.RandomAffine(180, shear=20),
+# transforms.RandomPerspective()
+])
+
+# color transforms
+color_transform = transforms.RandomChoice([
+    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+    transforms.RandomGrayscale()
+])
+
+random_transform = transforms.RandomApply([
+      transforms.RandomErasing()
+], p=0.5)
+
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(32),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-    transforms.RandomGrayscale(p=0.2),
+    color_transform,
+    geo_transform,
     transforms.ToTensor(),
+    # random_transform,  # 순서가 ToTensor 다음에 가야함
     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+
 
 test_transform = transforms.Compose([
     transforms.ToTensor(),
@@ -244,6 +274,7 @@ class ModelMoCo(nn.Module):
         self.T = T
         self.symmetric = symmetric
         self.num_patch = num_patch
+        self.sim = sim
 
         # create the encoders
         self.encoder_q = ModelBase(feature_dim=dim, arch=arch, bn_splits=bn_splits)
@@ -323,7 +354,7 @@ class ModelMoCo(nn.Module):
         batch_size = int(images_q.size()[0]/self.num_patch)
         q = []
         for i in range(batch_size):
-            q.append(_get_centroid(images_q[i*self.num_patch:(i+1)*self.num_patch]))
+            q.append(_get_centroid(images_q[i*self.num_patch:(i+1)*self.num_patch], sim=sim))
 
         return torch.stack(q)
 
@@ -332,11 +363,10 @@ class ModelMoCo(nn.Module):
         # compute query features
         q = self.encoder_q(images_q)  # queries: NxC
         q = nn.functional.normalize(q, dim=1)  # already normalized
-        # start = time.time()
         q = self.get_centroid(q, sim=sim)
-        # print(f"get_centriod : {time.time()-start:.4f}")
 
 
+        # start = time.time()
         # compute key features
         with torch.no_grad():  # no gradient to keys
             # shuffle for making use of BN
@@ -347,17 +377,27 @@ class ModelMoCo(nn.Module):
 
             # undo shuffle
             k = self._batch_unshuffle_single_gpu(k, idx_unshuffle) #여기서 저장
-            k = self.get_centroid(k, sim='cos')
+            k = self.get_centroid(k, sim=sim)
+        # print(f"k : {time.time()-start:.4f}")
 
         # compute logits
-        # Einstein sum is more intuitive
-        # positive logits: Nx1
-        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-        # negative logits: NxK
-        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        if sim == 'dot':
+            # Einstein sum is more intuitive
+            # positive logits: Nx1
+            l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+            # negative logits: NxK
+            l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        elif sim == 'cos' :
+            l_pos = torch.einsum('nc,nc->n', [F.normalize(q, dim=1), F.normalize(k, dim=1)]).unsqueeze(-1)
+            l_neg = torch.einsum('nc,ck->nk', [F.normalize(q, dim=1), F.normalize(self.queue.clone().detach(), dim=0)])
+        # elif sim == 'angle' :
+        #     ##TODO
+        #     angular_dist = torch.acos(nn.functional.cosine_similarity(centroid, pos_neg))
+        #     similarity = (torch.pi - angular_dist) / temp
+        #     Similarity.append(similarity)
 
         # logits: Nx(1+K)
-        logits = torch.cat([l_pos, l_neg], dim=1)
+        logits = torch.cat([l_pos, l_neg], dim=1)  # n,(k+1)
 
         # apply temperature
         logits /= self.T
@@ -422,9 +462,9 @@ def train(net, data_loader, train_optimizer, epoch, args):
 
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
     # t = time.time()
-    for images1, images2 in train_bar:  # (B,G/2,3,32,32) * 2
+    for i, (images1, images2) in enumerate(train_bar):  # (B,G/2,3,32,32) * 2
         # print(f"Data Load Time : {time.time()-t:.4f}")
-        # t = time.time()
+        t = time.time()
 
         # start = time.time()
         images1, images2 = images1.cuda(non_blocking=True), images2.cuda(non_blocking=True)
@@ -432,6 +472,7 @@ def train(net, data_loader, train_optimizer, epoch, args):
 
         loss = net(images1, images2)
         if torch.isnan(loss).any():
+            print(f"NaN at iter{i+1}")
             continue
 
         # print(f"Forward Time : {time.time()-t:.4f}")
@@ -450,6 +491,9 @@ def train(net, data_loader, train_optimizer, epoch, args):
         train_bar.set_description(msg)
         utils.write_log(args.results_dir + '/model_last.pth', msg)
 
+        if total_num == 0:
+            print("total_num이 0이 떠서 에러 잡기위해 멈춤.")
+            breakpoint()
     return total_loss / total_num
 
 # lr scheduler for training
