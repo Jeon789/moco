@@ -103,6 +103,9 @@ parser.add_argument('--seed', default=527, type=int)
 parser.add_argument('--GCL', default=True, type=str2bool)
 parser.add_argument('--num_patch', default=8, type=int)
 parser.add_argument('--sim', default='cos', type=str)
+parser.add_argument('--multi_gpu', default=None, type=ast.literal_eval)
+parser.add_argument('--fm_method', default=1, type=int)
+
 
 
 '''
@@ -153,6 +156,7 @@ class CIFAR10Grpoup(CIFAR10):
 
         return torch.stack(images1), torch.stack(images2)
 
+# original train transform #
 # train_transform = transforms.Compose([
 #     transforms.RandomResizedCrop(32),
 #     transforms.RandomHorizontalFlip(p=0.5),
@@ -335,8 +339,30 @@ class ModelMoCo(nn.Module):
     def get_centroid(self, images_q, sim='cos'):
         """ images_q, images_k (B,G/2,3,32,32) -> im_q, im_k (B,3,32,32) """
 
-        def _get_centroid(tensors, sim=sim):
+        def _get_centroid1(tensors, sim=sim):
+            if sim == 'dot':
+                return torch.mean(tensors, dim=0)
+            elif sim == 'cos' or sim == 'angle':
+                temp_cen = tensors[0]
+                for n in range(len(tensors)) :
+                    if n != 0 :
+                        add_vec = tensors[n]
+                        inner = torch.dot(temp_cen, add_vec)
+                        theta = torch.arccos(inner)
+                        
+                        y= torch.cos((n * theta) / (n + 1)) - torch.cos(theta) * torch.cos(theta / (n + 1))
+                        y= y / (1 - (torch.cos(theta)) ** 2)
+                        
+                        x = torch.cos(theta / (n + 1)) - y
+                        
+                        temp_cen = x * temp_cen + y * add_vec
+                        temp_cen = temp_cen / torch.linalg.norm(temp_cen, 2)
+                return temp_cen
+
+
+        def _get_centroid2(tensors, sim=sim):
             """ tensors =  tensor of size (num_gp,3,32,32)"""
+            """ angle n:1 """
             if sim == 'dot':
                 return torch.mean(tensors, dim=0)
             elif sim == 'cos' or sim == 'angle':
@@ -349,12 +375,31 @@ class ModelMoCo(nn.Module):
                         tan_vec  = next_vec - torch.dot(next_vec, temp_cen) * temp_cen
                         tan_vec  = tan_vec / (torch.linalg.norm(tan_vec, 2) + 1e-9)
                         temp_cen = torch.cos( (1/n+1)*theta ) * temp_cen + torch.sin( (1/n+1)*theta ) * tan_vec
+                        temp_cen = temp_cen / torch.linalg.norm(temp_cen, 2)
                 return temp_cen
+            
+        def _get_centroid3(tensors, sim='cos'):
+            """ tensors =  tensor of size (num_gp,3,32,32)"""
+            """ Recursive one """
+            if tensors.size()[0] == 1:
+                return tensors[0]
+            elif tensors.size()[0] == 2:
+                return torch.nn.functional.normalize(tensors[0] + tensors[1], dim=0)
+            elif tensors.size()[0] > 2 :
+                mid = int(tensors.size()[0] / 2)
+                temp1 = _get_centroid2(tensors[:mid], sim=sim)
+                temp2 = _get_centroid2(tensors[mid:], sim=sim)
+                return torch.nn.functional.normalize(temp1 + temp2, dim=0)
 
         batch_size = int(images_q.size()[0]/self.num_patch)
         q = []
         for i in range(batch_size):
-            q.append(_get_centroid(images_q[i*self.num_patch:(i+1)*self.num_patch], sim=sim))
+            if args.fm_method == 1:
+                q.append(_get_centroid1(images_q[i*self.num_patch:(i+1)*self.num_patch], sim=sim))
+            elif args.fm_method == 2:
+                q.append(_get_centroid2(images_q[i*self.num_patch:(i+1)*self.num_patch], sim=sim))
+            elif args.fm_method == 3:
+                q.append(_get_centroid3(images_q[i*self.num_patch:(i+1)*self.num_patch], sim=sim))
 
         return torch.stack(q)
 
@@ -448,7 +493,9 @@ model = ModelMoCo(
         num_patch=args.num_patch,
         sim = args.sim,
     ).cuda()
-print(model.encoder_q)
+# print(model.encoder_q)
+if args.multi_gpu:
+    model = torch.nn.DataParallel(model, device_ids=args.multi_gpu)
 
 """### Define train/test
 
@@ -464,13 +511,13 @@ def train(net, data_loader, train_optimizer, epoch, args):
     # t = time.time()
     for i, (images1, images2) in enumerate(train_bar):  # (B,G/2,3,32,32) * 2
         # print(f"Data Load Time : {time.time()-t:.4f}")
-        t = time.time()
+        # t = time.time()
 
         # start = time.time()
         images1, images2 = images1.cuda(non_blocking=True), images2.cuda(non_blocking=True)
         images1, images2 = images1.view(-1,3,32,32), images2.view(-1,3,32,32)
 
-        loss = net(images1, images2)
+        loss = net(images1, images2).mean()  # mean is for multi_gpu setting
         if torch.isnan(loss).any():
             print(f"NaN at iter{i+1}")
             continue

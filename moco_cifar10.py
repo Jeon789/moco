@@ -55,6 +55,7 @@ import argparse
 import json
 import math
 import os
+import ast
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -95,6 +96,8 @@ parser.add_argument('--knn-t', default=0.1, type=float, help='softmax temperatur
 # utils
 parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')
 parser.add_argument('--results_dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
+
+parser.add_argument('--multi_gpu', default=None, type=ast.literal_eval)
 
 
 '''
@@ -345,7 +348,9 @@ model = ModelMoCo(
         bn_splits=args.bn_splits,
         symmetric=args.symmetric,
     ).cuda()
-print(model.encoder_q)
+# if args.multi_gpu:
+# model = torch.nn.DataParallel(model, device_ids=args.multi_gpu)
+model = torch.nn.DataParallel(model, output_device=3)
 
 """### Define train/test
 
@@ -361,7 +366,7 @@ def train(net, data_loader, train_optimizer, epoch, args):
     for im_1, im_2 in train_bar:
         im_1, im_2 = im_1.cuda(non_blocking=True), im_2.cuda(non_blocking=True)
 
-        loss = net(im_1, im_2)
+        loss = net(im_1, im_2).mean()  # mean is for multi_gpu setting
 
         train_optimizer.zero_grad()
         loss.backward()
