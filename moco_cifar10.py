@@ -350,7 +350,7 @@ model = ModelMoCo(
     ).cuda()
 # if args.multi_gpu:
 # model = torch.nn.DataParallel(model, device_ids=args.multi_gpu)
-model = torch.nn.DataParallel(model, output_device=3)
+# model = torch.nn.DataParallel(model, output_device=3)
 
 """### Define train/test
 
@@ -429,21 +429,23 @@ def test(net, memory_data_loader, test_data_loader, epoch, args):
 # knn monitor as in InstDisc https://arxiv.org/abs/1805.01978
 # implementation follows http://github.com/zhirongw/lemniscate.pytorch and https://github.com/leftthomas/SimCLR
 def knn_predict(feature, feature_bank, feature_labels, classes, knn_k, knn_t):
+    """ (256,128), (128,50000), (50000), 10, """
+    breakpoint()
     # compute cos similarity between each feature vector and feature bank ---> [B, N]
     sim_matrix = torch.mm(feature, feature_bank)
     # [B, K]
-    sim_weight, sim_indices = sim_matrix.topk(k=knn_k, dim=-1)
+    sim_weight, sim_indices = sim_matrix.topk(k=knn_k, dim=-1)  # (256,200), (256,200) 값이랑 위치
     # [B, K]
-    sim_labels = torch.gather(feature_labels.expand(feature.size(0), -1), dim=-1, index=sim_indices)
+    sim_labels = torch.gather(feature_labels.expand(feature.size(0), -1), dim=-1, index=sim_indices) #(256,200) sim_weight들의 라벨
     sim_weight = (sim_weight / knn_t).exp()
 
     # counts for each class
-    one_hot_label = torch.zeros(feature.size(0) * knn_k, classes, device=sim_labels.device)
+    one_hot_label = torch.zeros(feature.size(0) * knn_k, classes, device=sim_labels.device) # 크기 맞춰서 재료만들기 (256*200, 10)
     # [B*K, C]
-    one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1), value=1.0)
+    one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1), value=1.0) # sim_labels 자리에 1 넣어주기 (scatter)
     # weighted score ---> [B, C]
-    pred_scores = torch.sum(one_hot_label.view(feature.size(0), -1, classes) * sim_weight.unsqueeze(dim=-1), dim=1)
-
+    pred_scores = torch.sum(one_hot_label.view(feature.size(0), -1, classes) * sim_weight.unsqueeze(dim=-1), dim=1) #(256,10)
+        # (256,200,10) * (256,200,1)
     pred_labels = pred_scores.argsort(dim=-1, descending=True)
     return pred_labels
 
